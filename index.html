@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Тест задержки интерполяции 360 гц в iRacing (1/60 сек)</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #1a1a1a;
+            color: #ffffff;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            user-select: none;
+        }
+        h1 { margin-bottom: 10px; }
+        .controls {
+            background-color: #2a2a2a;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            display: flex;
+            gap: 20px;
+            align-items: center;
+        }
+        label { cursor: pointer; font-weight: bold; }
+        .toggle-container {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        #game-area {
+            position: relative;
+            width: 600px;
+            height: 400px;
+            background-color: #111;
+            border: 2px solid #444;
+            border-radius: 8px;
+            overflow: hidden;
+            cursor: none;
+        }
+        #target {
+            position: absolute;
+            width: 40px;
+            height: 40px;
+            background-color: #ff4757;
+            border-radius: 50%;
+            display: none;
+            transform: translate(-50%, -50%);
+            z-index: 1;
+        }
+        #custom-cursor {
+            position: absolute;
+            width: 14px;
+            height: 14px;
+            border: 2px solid #2ed573;
+            border-radius: 50%;
+            pointer-events: none;
+            transform: translate(-50%, -50%);
+            display: none;
+            z-index: 10;
+        }
+        #custom-cursor::after {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 4px;
+            height: 4px;
+            background-color: #2ed573;
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+        }
+        #stats {
+            margin-top: 20px;
+            font-size: 1.1em;
+            text-align: center;
+        }
+        .btn {
+            background-color: #2ed573;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            font-size: 1em;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        .btn:hover { background-color: #26af5f; }
+        .delay-info {
+            color: #ffa502;
+            font-size: 0.9em;
+            margin-top: 5px;
+        }
+    </style>
+</head>
+<body>
+
+<h1>Влияние задержки 360 гц в iRacing (1/60 сек)</h1>
+
+<div class="controls">
+    <button class="btn" id="start-btn">Старт</button>
+    <div class="toggle-container">
+        <input type="checkbox" id="delay-toggle">
+        <label for="delay-toggle">Включить задержку движения и клика (1/60 с ≈ 16.67 мс)</label>
+    </div>
+</div>
+
+<div id="game-area">
+    <div id="target"></div>
+    <div id="custom-cursor"></div>
+</div>
+
+<div id="stats">
+    <div>Попаданий: <span id="hits">0</span> | Промахов/Пропусков: <span id="misses">0</span></div>
+    <div>Среднее время реакции: <span id="avg-time">0</span> мс</div>
+    <div class="delay-info" id="delay-status">Задержка отключена (0 мс)</div>
+</div>
+
+<script>
+    const gameArea = document.getElementById('game-area');
+    const target = document.getElementById('target');
+    const customCursor = document.getElementById('custom-cursor');
+    const startBtn = document.getElementById('start-btn');
+    const delayToggle = document.getElementById('delay-toggle');
+    const hitsSpan = document.getElementById('hits');
+    const missesSpan = document.getElementById('misses');
+    const avgTimeSpan = document.getElementById('avg-time');
+    const delayStatus = document.getElementById('delay-status');
+
+    let hits = 0;
+    let misses = 0;
+    let isPlaying = false;
+    let targetTimeout;
+    let spawnTimeout;
+    let targetSpawnTime;
+    let reactionTimes = [];
+
+    const targetLifetime = 800;
+    const delayMs = 1000 / 60; // 16.67 мс
+
+    let virtualX = 0;
+    let virtualY = 0;
+
+    delayToggle.addEventListener('change', () => {
+        if (delayToggle.checked) {
+            delayStatus.innerText = "Полная задержка включена (+16.67 мс на движение и на клик)";
+            delayStatus.style.color = "#ff4757";
+        } else {
+            delayStatus.innerText = "Задержка отключена (0 мс)";
+            delayStatus.style.color = "#ffa502";
+        }
+    });
+
+    gameArea.addEventListener('mouseenter', () => { customCursor.style.display = 'block'; });
+    gameArea.addEventListener('mouseleave', () => { customCursor.style.display = 'none'; });
+
+    // ЗАДЕРЖКА ДВИЖЕНИЯ
+    gameArea.addEventListener('mousemove', (e) => {
+        const rect = gameArea.getBoundingClientRect();
+        const realX = e.clientX - rect.left;
+        const realY = e.clientY - rect.top;
+
+        if (delayToggle.checked) {
+            setTimeout(() => {
+                updateCursorPosition(realX, realY);
+            }, delayMs);
+        } else {
+            updateCursorPosition(realX, realY);
+        }
+    });
+
+    function updateCursorPosition(x, y) {
+        virtualX = x;
+        virtualY = y;
+        customCursor.style.left = `${x}px`;
+        customCursor.style.top = `${y}px`;
+    }
+
+    startBtn.addEventListener('click', () => {
+        if (isPlaying) stopGame();
+        else startGame();
+    });
+
+    function startGame() {
+        isPlaying = true;
+        hits = 0; misses = 0; reactionTimes = [];
+        hitsSpan.innerText = hits; missesSpan.innerText = misses; avgTimeSpan.innerText = 0;
+        startBtn.innerText = "Стоп"; startBtn.style.backgroundColor = "#ff4757";
+        scheduleNextSpawn();
+    }
+
+    function stopGame() {
+        isPlaying = false;
+        startBtn.innerText = "Старт"; startBtn.style.backgroundColor = "#2ed573";
+        target.style.display = 'none';
+        clearTimeout(targetTimeout); clearTimeout(spawnTimeout);
+    }
+
+    function scheduleNextSpawn() {
+        if (!isPlaying) return;
+        const randomDelay = Math.random() * 1500 + 500;
+        spawnTimeout = setTimeout(spawnTarget, randomDelay);
+    }
+
+    function spawnTarget() {
+        if (!isPlaying) return;
+
+        const areaWidth = gameArea.clientWidth;
+        const areaHeight = gameArea.clientHeight;
+        const padding = 40;
+
+        const x = Math.random() * (areaWidth - padding * 2) + padding;
+        const y = Math.random() * (areaHeight - padding * 2) + padding;
+
+        target.style.left = `${x}px`;
+        target.style.top = `${y}px`;
+        target.style.display = 'block';
+
+        targetSpawnTime = performance.now();
+
+        targetTimeout = setTimeout(() => {
+            target.style.display = 'none';
+            misses++;
+            missesSpan.innerText = misses;
+            scheduleNextSpawn();
+        }, targetLifetime);
+    }
+
+    // ЗАДЕРЖКА КЛИКА
+    gameArea.addEventListener('mousedown', () => {
+        if (!isPlaying || target.style.display === 'none') return;
+
+        const clickTime = performance.now();
+
+        // Фиксируем координаты виртуального прицела, на которых пользователь НАЖАЛ клавишу
+        const snapX = virtualX;
+        const snapY = virtualY;
+
+        if (delayToggle.checked) {
+            // Сам выстрел произойдет только через 16.67 мс на основе зафиксированных координат
+            setTimeout(() => {
+                executeShot(snapX, snapY, clickTime);
+            }, delayMs);
+        } else {
+            executeShot(snapX, snapY, clickTime);
+        }
+    });
+
+    function executeShot(cursorX, cursorY, initialClickTime) {
+        // Если за время задержки цель уже исчезла по таймеру
+        if (target.style.display === 'none') {
+            misses++;
+            missesSpan.innerText = misses;
+            return;
+        }
+
+        const targetX = parseFloat(target.style.left);
+        const targetY = parseFloat(target.style.top);
+        const targetRadius = 20;
+
+        const distance = Math.sqrt(Math.pow(cursorX - targetX, 2) + Math.pow(cursorY - targetY, 2));
+
+        if (distance <= targetRadius) {
+            clearTimeout(targetTimeout);
+            target.style.display = 'none';
+            hits++;
+            hitsSpan.innerText = hits;
+
+            // Фиксируем время реакции именно с учетом времени физического нажатия
+            const reactionTime = initialClickTime - targetSpawnTime;
+            reactionTimes.push(reactionTime);
+
+            const avg = reactionTimes.reduce((a, b) => a + b, 0) / reactionTimes.length;
+            avgTimeSpan.innerText = avg.toFixed(1);
+
+            scheduleNextSpawn();
+        } else {
+            misses++;
+            missesSpan.innerText = misses;
+        }
+    }
+</script>
+</body>
+</html>
